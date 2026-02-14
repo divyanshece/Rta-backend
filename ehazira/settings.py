@@ -161,11 +161,12 @@ else:
         "http://127.0.0.1:8081",
     ]
 
-# Mobile app origins (Capacitor)
+# Mobile app origins (Capacitor) and Vercel deployments
 CORS_ALLOWED_ORIGIN_REGEXES = [
     r"^http://localhost(:\d+)?$",  # Capacitor Android/iOS
     r"^capacitor://localhost$",    # Capacitor iOS
     r"^https?://192\.168\.\d+\.\d+(:\d+)?$",  # Local network testing
+    r"^https://.*\.vercel\.app$",  # Vercel preview and production deployments
 ]
 
 CORS_ALLOW_CREDENTIALS = True
