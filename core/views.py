@@ -2493,28 +2493,37 @@ class StudentActiveSessionView(APIView):
         except Student.DoesNotExist:
             return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
-        # Find active sessions for subjects the student is enrolled in
-        from django.db.models import Q
-        enrolled_subject_ids = list(
-            SubjectEnrollment.objects.filter(student=student).values_list('subject_id', flat=True)
-        )
+        # Get student's class IDs (same logic as StartSession uses to create attendance records)
+        # 1. Primary class
+        class_ids = set()
+        if student.class_field_id:
+            class_ids.add(student.class_field_id)
 
-        if not enrolled_subject_ids:
+        # 2. Classes enrolled via StudentClass
+        enrolled_class_ids = StudentClass.objects.filter(
+            student=student
+        ).values_list('class_obj_id', flat=True)
+        class_ids.update(enrolled_class_ids)
+
+        if not class_ids:
             return Response({'active_session': None})
 
+        # Find active sessions in any of the student's classes
+        # Session -> Period -> Subject -> class_field
         active_session = Session.objects.filter(
-            subject_id__in=enrolled_subject_ids,
+            period__subject__class_field_id__in=class_ids,
             is_active=True,
-        ).select_related('subject', 'subject__course', 'subject__class_field').first()
+        ).select_related('period__subject__course', 'period__subject__class_field').first()
 
         if not active_session:
             return Response({'active_session': None})
 
+        subject = active_session.period.subject
         return Response({
             'active_session': {
                 'session_id': active_session.session_id,
-                'subject_name': active_session.subject.course.course_name if active_session.subject.course else '',
-                'class_name': str(active_session.subject.class_field) if active_session.subject.class_field else '',
+                'subject_name': subject.course.course_name if subject.course else '',
+                'class_name': str(subject.class_field) if subject.class_field else '',
             }
         })
 
