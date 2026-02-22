@@ -689,25 +689,24 @@ class InitiateAttendanceView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Auto-close any stale active session for this period on this date
-            active_session = Session.objects.filter(
-                period=period,
-                date=date_str,
-                is_active=True
-            ).first()
-
-            if active_session:
-                # Close the stale session (teacher navigated away without closing)
+            # Auto-close ALL stale active sessions for this class (not just this period)
+            # This catches sessions where teacher navigated away without closing
+            stale_sessions = Session.objects.filter(
+                period__subject__class_field=subject.class_field,
+                is_active=True,
+            )
+            for stale in stale_sessions:
                 Attendance.objects.filter(
-                    session=active_session,
+                    session=stale,
                     submitted_at__isnull=True
                 ).update(status='A', submitted_at=timezone.now())
                 Attendance.objects.filter(
-                    session=active_session,
+                    session=stale,
                     status='X'
                 ).update(status='A')
-                active_session.is_active = False
-                active_session.save()
+                stale.is_active = False
+                stale.closed_at = timezone.now()
+                stale.save()
 
             # Generate alphanumeric OTP and create NEW session (allows multiple sessions per day)
             otp = generate_alphanumeric_otp(4)
@@ -2497,12 +2496,10 @@ class StudentActiveSessionView(APIView):
             return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
 
         # Get student's class IDs (same logic as StartSession uses to create attendance records)
-        # 1. Primary class
         class_ids = set()
         if student.class_field_id:
             class_ids.add(student.class_field_id)
 
-        # 2. Classes enrolled via StudentClass
         enrolled_class_ids = StudentClass.objects.filter(
             student=student
         ).values_list('class_obj_id', flat=True)
@@ -2511,11 +2508,29 @@ class StudentActiveSessionView(APIView):
         if not class_ids:
             return Response({'active_session': None})
 
-        # Find active sessions in any of the student's classes
-        # Session -> Period -> Subject -> class_field
+        today = timezone.now().date()
+
+        # Auto-close stale sessions from previous days
+        stale_sessions = Session.objects.filter(
+            period__subject__class_field_id__in=class_ids,
+            is_active=True,
+        ).exclude(date=today)
+
+        if stale_sessions.exists():
+            for stale in stale_sessions:
+                Attendance.objects.filter(session=stale, submitted_at__isnull=True).update(
+                    status='A', submitted_at=timezone.now()
+                )
+                stale.is_active = False
+                stale.closed_at = timezone.now()
+                stale.save()
+            logger.info(f'Auto-closed {stale_sessions.count()} stale sessions for student {student.student_email}')
+
+        # Only find active sessions from TODAY
         active_session = Session.objects.filter(
             period__subject__class_field_id__in=class_ids,
             is_active=True,
+            date=today,
         ).select_related('period__subject__course', 'period__subject__class_field').first()
 
         if not active_session:
@@ -2550,7 +2565,7 @@ class StudentSubmitOTPView(APIView):
         student_email = str(request.user)
 
         MAX_RETRY_COUNT = 3
-        OTP_VALIDITY_SECONDS = getattr(settings, 'OTP_VALIDITY_SECONDS', 30)
+        OTP_VALIDITY_SECONDS = getattr(settings, 'OTP_VALIDITY_SECONDS', 120)
 
         try:
             session = Session.objects.get(session_id=session_id)
@@ -2559,6 +2574,13 @@ class StudentSubmitOTPView(APIView):
 
         if not session.is_active:
             return Response({'success': False, 'message': 'Session closed'})
+
+        # Reject stale sessions from previous days
+        if session.date != timezone.now().date():
+            session.is_active = False
+            session.closed_at = timezone.now()
+            session.save()
+            return Response({'success': False, 'message': 'Session expired (from a previous day)'})
 
         try:
             student = Student.objects.get(student_email=student_email)

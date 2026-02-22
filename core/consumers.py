@@ -78,7 +78,7 @@ class AttendanceConsumer(AsyncJsonWebsocketConsumer):
         from core.models import Session, Attendance, Student, Device
 
         MAX_RETRY_COUNT = 3
-        OTP_VALIDITY_SECONDS = getattr(settings, 'OTP_VALIDITY_SECONDS', 30)  # 30 seconds default
+        OTP_VALIDITY_SECONDS = getattr(settings, 'OTP_VALIDITY_SECONDS', 120)
 
         try:
             session = Session.objects.get(session_id=session_id)
@@ -88,6 +88,19 @@ class AttendanceConsumer(AsyncJsonWebsocketConsumer):
                     'type': 'otp_result',
                     'success': False,
                     'message': 'Session closed',
+                    'retry_available': False,
+                    'blocked': False
+                }
+
+            # Reject stale sessions from previous days
+            if session.date != timezone.now().date():
+                session.is_active = False
+                session.closed_at = timezone.now()
+                session.save()
+                return {
+                    'type': 'otp_result',
+                    'success': False,
+                    'message': 'Session expired (from a previous day)',
                     'retry_available': False,
                     'blocked': False
                 }
