@@ -257,7 +257,7 @@ class Device(models.Model):
     
     device_id = models.AutoField(primary_key=True)
     user_email = models.EmailField()
-    device_uuid = models.UUIDField()
+    device_uuid = models.CharField(max_length=128)
     fingerprint_hash = models.CharField(max_length=64)
     integrity_level = models.CharField(max_length=10, choices=INTEGRITY_LEVELS)
     platform = models.CharField(max_length=10, choices=PLATFORMS)
