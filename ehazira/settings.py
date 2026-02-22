@@ -200,7 +200,7 @@ FIREBASE_KEY_PATH = os.getenv('FIREBASE_KEY_PATH', 'firebase-key.json')
 FIREBASE_KEY_JSON = os.getenv('FIREBASE_KEY_JSON', '')
 
 # OTP Configuration
-OTP_VALIDITY_SECONDS = int(os.getenv('OTP_VALIDITY_SECONDS', 15))
+OTP_VALIDITY_SECONDS = int(os.getenv('OTP_VALIDITY_SECONDS', 120))
 MAX_OTP_RETRY = int(os.getenv('MAX_OTP_RETRY', 1))
 
 LOGGING = {
