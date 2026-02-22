@@ -686,7 +686,7 @@ class InitiateAttendanceView(APIView):
                     status=status.HTTP_400_BAD_REQUEST
                 )
 
-            # Check for existing ACTIVE session for this period on this date
+            # Auto-close any stale active session for this period on this date
             active_session = Session.objects.filter(
                 period=period,
                 date=date_str,
@@ -694,12 +694,17 @@ class InitiateAttendanceView(APIView):
             ).first()
 
             if active_session:
-                # Return the existing active session instead of creating new one
-                return Response({
-                    'error': 'Active session already exists for this subject today',
-                    'session_id': active_session.session_id,
-                    'otp': active_session.otp
-                }, status=status.HTTP_400_BAD_REQUEST)
+                # Close the stale session (teacher navigated away without closing)
+                Attendance.objects.filter(
+                    session=active_session,
+                    submitted_at__isnull=True
+                ).update(status='A', submitted_at=timezone.now())
+                Attendance.objects.filter(
+                    session=active_session,
+                    status='X'
+                ).update(status='A')
+                active_session.is_active = False
+                active_session.save()
 
             # Generate alphanumeric OTP and create NEW session (allows multiple sessions per day)
             otp = generate_alphanumeric_otp(4)
