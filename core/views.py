@@ -562,7 +562,7 @@ class ResetStudentDeviceView(APIView):
         if student.class_field_id:
             student_class_ids.append(student.class_field_id)
 
-        teacher_class_ids = list(Subject.objects.filter(teacher_email=teacher_email).values_list('class_field_id', flat=True))
+        teacher_class_ids = list(Subject.objects.filter(teacher__teacher_email=teacher_email).values_list('class_field_id', flat=True))
         teacher_class_ids += list(ClassTeacher.objects.filter(teacher=teacher).values_list('class_obj_id', flat=True))
 
         has_authority = bool(set(student_class_ids) & set(teacher_class_ids))
@@ -762,16 +762,19 @@ class InitiateAttendanceView(APIView):
             # Get student emails
             student_emails = list(students.values_list('student_email', flat=True))
 
-            # Broadcast to all students
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                'all_students',
-                {
-                    'type': 'attendance_started',
-                    'session_id': session.session_id,
-                    'message': 'Attendance session started'
-                }
-            )
+            # Broadcast to all students (non-blocking - don't fail if Redis is down)
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    'all_students',
+                    {
+                        'type': 'attendance_started',
+                        'session_id': session.session_id,
+                        'message': 'Attendance session started'
+                    }
+                )
+            except Exception:
+                pass  # WebSocket broadcast is optional
 
             return Response({
                 'session_id': session.session_id,
@@ -855,16 +858,19 @@ class CloseAttendanceView(APIView):
             session.closed_at = timezone.now()
             session.save()
 
-            # Broadcast
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                'all_students',
-                {
-                    'type': 'attendance_closed',
-                    'session_id': session_id,
-                    'message': 'Session closed'
-                }
-            )
+            # Broadcast (non-blocking)
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    'all_students',
+                    {
+                        'type': 'attendance_closed',
+                        'session_id': session_id,
+                        'message': 'Session closed'
+                    }
+                )
+            except Exception:
+                pass
 
             return Response(
                 {'message': 'Session closed successfully'},
@@ -925,16 +931,19 @@ class RegenerateOTPView(APIView):
             session.otp_generated_at = timezone.now()
             session.save()
 
-            # Broadcast OTP regeneration to all students
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                'all_students',
-                {
-                    'type': 'otp_regenerated',
-                    'session_id': session_id,
-                    'message': 'New OTP generated'
-                }
-            )
+            # Broadcast OTP regeneration (non-blocking)
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    'all_students',
+                    {
+                        'type': 'otp_regenerated',
+                        'session_id': session_id,
+                        'message': 'New OTP generated'
+                    }
+                )
+            except Exception:
+                pass
 
             return Response({
                 'session_id': session.session_id,
@@ -1095,17 +1104,20 @@ class ManualMarkView(APIView):
                 attendance.submitted_at = timezone.now()
             attendance.save()
 
-            # Broadcast update
-            channel_layer = get_channel_layer()
-            async_to_sync(channel_layer.group_send)(
-                'all_teachers',
-                {
-                    'type': 'attendance_update',
-                    'session_id': session.session_id,
-                    'student_email': student_email,
-                    'status': new_status
-                }
-            )
+            # Broadcast update (non-blocking)
+            try:
+                channel_layer = get_channel_layer()
+                async_to_sync(channel_layer.group_send)(
+                    'all_teachers',
+                    {
+                        'type': 'attendance_update',
+                        'session_id': session.session_id,
+                        'student_email': student_email,
+                        'status': new_status
+                    }
+                )
+            except Exception:
+                pass
 
             return Response(
                 {'message': 'Attendance updated successfully'},
