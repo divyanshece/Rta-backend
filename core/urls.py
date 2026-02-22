@@ -66,6 +66,12 @@ from .views import (
     AdminTeacherImportView,
     AdminDepartmentListView,
     AdminToggleView,
+    # Admin Student Management
+    AdminStudentListView,
+    AdminStudentDetailView,
+    AdminStudentDeviceResetView,
+    # Teacher Student Update
+    UpdateStudentView,
 )
 
 urlpatterns = [
@@ -163,4 +169,12 @@ urlpatterns = [
     path('admin/teachers/import/', AdminTeacherImportView.as_view(), name='admin-teachers-import'),
     path('admin/departments/', AdminDepartmentListView.as_view(), name='admin-departments'),
     path('admin/toggle/', AdminToggleView.as_view(), name='admin-toggle'),
+
+    # Admin Student Management
+    path('admin/students/', AdminStudentListView.as_view(), name='admin-students'),
+    path('admin/students/<str:email>/', AdminStudentDetailView.as_view(), name='admin-student-detail'),
+    path('admin/students/<str:email>/reset-device/', AdminStudentDeviceResetView.as_view(), name='admin-student-reset-device'),
+
+    # Teacher Student Update
+    path('classes/<int:pk>/students/<str:email>/update/', UpdateStudentView.as_view(), name='update-student'),
 ]

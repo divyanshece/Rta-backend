@@ -293,7 +293,7 @@ class GoogleAuthView(APIView):
                 )
 
             # SECURITY: Mobile must provide device info
-            if not device_uuid or not fingerprint_hash:
+            if not device_uuid:
                 return Response(
                     {
                         'error': 'Device information required',
@@ -307,24 +307,67 @@ class GoogleAuthView(APIView):
             if platform not in ['ANDROID', 'IOS']:
                 platform = 'ANDROID'  # Default to Android for mobile
 
-            # Check for existing active device
-            active_device = Device.objects.filter(user_email=email, active=True).first()
+            try:
+                # Check for existing active device
+                active_device = Device.objects.filter(user_email=email, active=True).first()
 
-            if active_device:
-                # Check if it's the SAME device
-                is_same_device = (
-                    str(active_device.device_uuid) == device_uuid and
-                    active_device.fingerprint_hash == fingerprint_hash
-                )
+                if active_device:
+                    # Check if it's the SAME device (UUID-only comparison;
+                    # fingerprint is stored for audit but not used for blocking)
+                    is_same_device = str(active_device.device_uuid) == str(device_uuid)
 
-                if is_same_device:
-                    # Same device - allow login, update last_login
-                    active_device.last_login = timezone.now()
-                    active_device.save()
+                    if is_same_device:
+                        # Same device - allow login, update fingerprint & last_login
+                        active_device.last_login = timezone.now()
+                        if fingerprint_hash and active_device.fingerprint_hash != fingerprint_hash:
+                            active_device.fingerprint_hash = fingerprint_hash
+                        active_device.save()
+
+                        user_info = self._get_student_info(student)
+                        access_token = self._generate_jwt(student.student_email, 'student', device_id=active_device.device_id)
+                        refresh_token = self._generate_jwt(student.student_email, 'student', device_id=active_device.device_id, refresh=True)
+
+                        return Response({
+                            'access_token': access_token,
+                            'refresh_token': refresh_token,
+                            'user_type': 'student',
+                            'user_info': user_info,
+                            'device_approved': True,
+                            'device_id': active_device.device_id,
+                        })
+                    else:
+                        # DIFFERENT device while another is active - BLOCK!
+                        return Response(
+                            {
+                                'error': 'Already logged in on another device',
+                                'code': 'DEVICE_CONFLICT',
+                                'message': f'You are already logged in on another {active_device.platform} device. Please logout from that device first, or contact your teacher to reset your device.',
+                                'active_device_platform': active_device.platform,
+                                'active_device_registered': active_device.registered_at.isoformat(),
+                            },
+                            status=status.HTTP_403_FORBIDDEN
+                        )
+
+                # No active device - check if this device was previously registered (UUID-only match)
+                existing_device = Device.objects.filter(
+                    user_email=email,
+                    device_uuid=device_uuid,
+                ).first()
+
+                if existing_device:
+                    # Device exists but inactive - reactivate it
+                    Device.objects.filter(user_email=email).exclude(device_id=existing_device.device_id).update(active=False)
+
+                    existing_device.active = True
+                    existing_device.last_login = timezone.now()
+                    existing_device.platform = platform
+                    if fingerprint_hash:
+                        existing_device.fingerprint_hash = fingerprint_hash
+                    existing_device.save()
 
                     user_info = self._get_student_info(student)
-                    access_token = self._generate_jwt(student.student_email, 'student', device_id=active_device.device_id)
-                    refresh_token = self._generate_jwt(student.student_email, 'student', device_id=active_device.device_id, refresh=True)
+                    access_token = self._generate_jwt(student.student_email, 'student', device_id=existing_device.device_id)
+                    refresh_token = self._generate_jwt(student.student_email, 'student', device_id=existing_device.device_id, refresh=True)
 
                     return Response({
                         'access_token': access_token,
@@ -332,41 +375,25 @@ class GoogleAuthView(APIView):
                         'user_type': 'student',
                         'user_info': user_info,
                         'device_approved': True,
-                        'device_id': active_device.device_id,
+                        'device_id': existing_device.device_id,
                     })
-                else:
-                    # DIFFERENT device while another is active - BLOCK!
-                    return Response(
-                        {
-                            'error': 'Already logged in on another device',
-                            'code': 'DEVICE_CONFLICT',
-                            'message': f'You are already logged in on another {active_device.platform} device. Please logout from that device first, or contact your teacher to reset your device.',
-                            'active_device_platform': active_device.platform,
-                            'active_device_registered': active_device.registered_at.isoformat(),
-                        },
-                        status=status.HTTP_403_FORBIDDEN
-                    )
 
-            # No active device - check if this device was previously registered
-            existing_device = Device.objects.filter(
-                user_email=email,
-                device_uuid=device_uuid,
-                fingerprint_hash=fingerprint_hash
-            ).first()
+                # NEW DEVICE - Register automatically
+                # Deactivate any existing devices first
+                Device.objects.filter(user_email=email).update(active=False)
 
-            if existing_device:
-                # Device exists but inactive - reactivate it
-                # First, deactivate any other devices (shouldn't exist but safety check)
-                Device.objects.filter(user_email=email).exclude(device_id=existing_device.device_id).update(active=False)
-
-                existing_device.active = True
-                existing_device.last_login = timezone.now()
-                existing_device.platform = platform
-                existing_device.save()
+                new_device = Device.objects.create(
+                    user_email=email,
+                    device_uuid=device_uuid,
+                    fingerprint_hash=fingerprint_hash or 'unknown',
+                    integrity_level='BASIC',
+                    platform=platform,
+                    active=True,
+                )
 
                 user_info = self._get_student_info(student)
-                access_token = self._generate_jwt(student.student_email, 'student', device_id=existing_device.device_id)
-                refresh_token = self._generate_jwt(student.student_email, 'student', device_id=existing_device.device_id, refresh=True)
+                access_token = self._generate_jwt(student.student_email, 'student', device_id=new_device.device_id)
+                refresh_token = self._generate_jwt(student.student_email, 'student', device_id=new_device.device_id, refresh=True)
 
                 return Response({
                     'access_token': access_token,
@@ -374,35 +401,21 @@ class GoogleAuthView(APIView):
                     'user_type': 'student',
                     'user_info': user_info,
                     'device_approved': True,
-                    'device_id': existing_device.device_id,
+                    'device_id': new_device.device_id,
+                    'is_new_device': True,
                 })
 
-            # NEW DEVICE - Register and require approval
-            # Deactivate any existing devices first
-            Device.objects.filter(user_email=email).update(active=False)
-
-            new_device = Device.objects.create(
-                user_email=email,
-                device_uuid=device_uuid,
-                fingerprint_hash=fingerprint_hash,
-                integrity_level='BASIC',  # Can be enhanced with Play Integrity API
-                platform=platform,
-                active=True,  # Auto-approve first device for convenience
-            )
-
-            user_info = self._get_student_info(student)
-            access_token = self._generate_jwt(student.student_email, 'student', device_id=new_device.device_id)
-            refresh_token = self._generate_jwt(student.student_email, 'student', device_id=new_device.device_id, refresh=True)
-
-            return Response({
-                'access_token': access_token,
-                'refresh_token': refresh_token,
-                'user_type': 'student',
-                'user_info': user_info,
-                'device_approved': True,
-                'device_id': new_device.device_id,
-                'is_new_device': True,
-            })
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                return Response(
+                    {
+                        'error': 'Device verification failed',
+                        'code': 'DEVICE_ERROR',
+                        'message': 'An error occurred during device verification. Please try again or contact support.',
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
 
         return Response(
             {'error': f'User not found or not verified: {email}'},
@@ -4012,6 +4025,228 @@ class AdminToggleView(APIView):
                 added_by=Teacher.objects.filter(teacher_email=str(request.user)).first()
             )
             return Response({'message': 'Admin status granted', 'is_admin': True})
+
+
+class AdminStudentListView(APIView):
+    """List/search all students in organization for admin"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def _get_org_for_admin(self, request):
+        if request.user_type != 'teacher':
+            return None
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+        return admin_entry.organization if admin_entry else None
+
+    def get(self, request):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        search = request.query_params.get('search', '').strip()
+
+        students = Student.objects.filter(
+            class_field__department__organization=org
+        ).select_related('class_field', 'class_field__department')
+
+        if search:
+            students = students.filter(
+                Q(name__icontains=search) |
+                Q(student_email__icontains=search) |
+                Q(roll_no__icontains=search)
+            )
+
+        students = students.order_by('name')[:100]
+
+        student_list = []
+        student_emails = [s.student_email for s in students]
+        active_devices = set(
+            Device.objects.filter(user_email__in=student_emails, active=True)
+            .values_list('user_email', flat=True)
+        )
+
+        for s in students:
+            student_list.append({
+                'email': s.student_email,
+                'name': s.name,
+                'roll_no': s.roll_no,
+                'verified': s.verified,
+                'class_id': s.class_field.class_id if s.class_field else None,
+                'class_name': str(s.class_field) if s.class_field else None,
+                'department': s.class_field.department.department_name if s.class_field and s.class_field.department else None,
+                'has_active_device': s.student_email in active_devices,
+            })
+
+        return Response({
+            'students': student_list,
+            'count': len(student_list),
+        })
+
+
+class AdminStudentDetailView(APIView):
+    """Get/update a student's details (admin only)"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def _get_org_for_admin(self, request):
+        if request.user_type != 'teacher':
+            return None
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+        return admin_entry.organization if admin_entry else None
+
+    def get(self, request, email):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        student = Student.objects.filter(
+            student_email=email,
+            class_field__department__organization=org
+        ).select_related('class_field', 'class_field__department').first()
+
+        if not student:
+            return Response({'error': 'Student not found in organization'}, status=status.HTTP_404_NOT_FOUND)
+
+        devices = Device.objects.filter(user_email=email).order_by('-last_login')
+        device_list = [{
+            'device_id': d.device_id,
+            'platform': d.platform,
+            'active': d.active,
+            'registered_at': d.registered_at.isoformat(),
+            'last_login': d.last_login.isoformat() if d.last_login else None,
+        } for d in devices]
+
+        return Response({
+            'email': student.student_email,
+            'name': student.name,
+            'roll_no': student.roll_no,
+            'verified': student.verified,
+            'class_id': student.class_field.class_id if student.class_field else None,
+            'class_name': str(student.class_field) if student.class_field else None,
+            'department': student.class_field.department.department_name if student.class_field and student.class_field.department else None,
+            'devices': device_list,
+        })
+
+    def put(self, request, email):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        student = Student.objects.filter(
+            student_email=email,
+            class_field__department__organization=org
+        ).first()
+
+        if not student:
+            return Response({'error': 'Student not found in organization'}, status=status.HTTP_404_NOT_FOUND)
+
+        name = request.data.get('name')
+        roll_no = request.data.get('roll_no')
+
+        if name:
+            student.name = name
+        if roll_no:
+            student.roll_no = roll_no
+            # Also update roll_no in StudentClass entries
+            StudentClass.objects.filter(student=student).update(roll_no=roll_no)
+
+        student.save()
+
+        return Response({
+            'message': 'Student updated successfully',
+            'email': student.student_email,
+            'name': student.name,
+            'roll_no': student.roll_no,
+        })
+
+
+class AdminStudentDeviceResetView(APIView):
+    """Reset a student's device (admin only)"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def post(self, request, email):
+        if request.user_type != 'teacher':
+            return Response({'error': 'Teachers only'}, status=status.HTTP_403_FORBIDDEN)
+
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+
+        if not admin_entry:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        org = admin_entry.organization
+
+        student = Student.objects.filter(
+            student_email=email,
+            class_field__department__organization=org
+        ).first()
+
+        if not student:
+            return Response({'error': 'Student not found in organization'}, status=status.HTTP_404_NOT_FOUND)
+
+        devices_deleted = Device.objects.filter(user_email=email).delete()[0]
+
+        return Response({
+            'message': f'Device reset successful for {student.name}',
+            'devices_removed': devices_deleted,
+        })
+
+
+class UpdateStudentView(APIView):
+    """Teacher endpoint to update student details in their class"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def put(self, request, pk, email):
+        if request.user_type != 'teacher':
+            return Response({'error': 'Teachers only'}, status=status.HTTP_403_FORBIDDEN)
+
+        teacher_email = str(request.user)
+
+        try:
+            class_obj = ClassModel.objects.get(class_id=pk)
+        except ClassModel.DoesNotExist:
+            return Response({'error': 'Class not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Verify teacher has authority: is coordinator or assigned teacher
+        is_coordinator = (class_obj.coordinator and class_obj.coordinator.teacher_email == teacher_email)
+        is_assigned = ClassTeacher.objects.filter(class_obj=class_obj, teacher__teacher_email=teacher_email).exists()
+        teaches_subject = Subject.objects.filter(class_field=class_obj, teacher__teacher_email=teacher_email).exists()
+
+        if not (is_coordinator or is_assigned or teaches_subject):
+            return Response({'error': 'You do not have authority over this class'}, status=status.HTTP_403_FORBIDDEN)
+
+        student = Student.objects.filter(student_email=email).first()
+        if not student:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Verify student is in this class
+        is_enrolled = (
+            student.class_field_id == class_obj.class_id or
+            StudentClass.objects.filter(student=student, class_obj=class_obj).exists()
+        )
+        if not is_enrolled:
+            return Response({'error': 'Student is not enrolled in this class'}, status=status.HTTP_403_FORBIDDEN)
+
+        name = request.data.get('name')
+        roll_no = request.data.get('roll_no')
+
+        if name:
+            student.name = name
+        if roll_no:
+            student.roll_no = roll_no
+            StudentClass.objects.filter(student=student).update(roll_no=roll_no)
+
+        student.save()
+
+        return Response({
+            'message': 'Student updated successfully',
+            'email': student.student_email,
+            'name': student.name,
+            'roll_no': student.roll_no,
+        })
 
 
 class ExportSubjectAttendanceView(APIView):
