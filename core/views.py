@@ -308,13 +308,16 @@ class GoogleAuthView(APIView):
                 platform = 'ANDROID'  # Default to Android for mobile
 
             try:
+                # Normalize device_uuid to string for safe comparison/storage
+                device_uuid = str(device_uuid).strip()
+
                 # Check for existing active device
                 active_device = Device.objects.filter(user_email=email, active=True).first()
 
                 if active_device:
                     # Check if it's the SAME device (UUID-only comparison;
                     # fingerprint is stored for audit but not used for blocking)
-                    is_same_device = str(active_device.device_uuid) == str(device_uuid)
+                    is_same_device = str(active_device.device_uuid) == device_uuid
 
                     if is_same_device:
                         # Same device - allow login, update fingerprint & last_login
@@ -348,15 +351,18 @@ class GoogleAuthView(APIView):
                             status=status.HTTP_403_FORBIDDEN
                         )
 
-                # No active device - check if this device was previously registered (UUID-only match)
-                existing_device = Device.objects.filter(
-                    user_email=email,
-                    device_uuid=device_uuid,
-                ).first()
+                # No active device - check if this device was previously registered
+                # Use Python-level comparison to avoid DB-level UUID validation issues
+                all_devices = Device.objects.filter(user_email=email)
+                existing_device = None
+                for dev in all_devices:
+                    if str(dev.device_uuid) == device_uuid:
+                        existing_device = dev
+                        break
 
                 if existing_device:
                     # Device exists but inactive - reactivate it
-                    Device.objects.filter(user_email=email).exclude(device_id=existing_device.device_id).update(active=False)
+                    all_devices.exclude(device_id=existing_device.device_id).update(active=False)
 
                     existing_device.active = True
                     existing_device.last_login = timezone.now()
@@ -380,7 +386,7 @@ class GoogleAuthView(APIView):
 
                 # NEW DEVICE - Register automatically
                 # Deactivate any existing devices first
-                Device.objects.filter(user_email=email).update(active=False)
+                all_devices.update(active=False)
 
                 new_device = Device.objects.create(
                     user_email=email,
@@ -412,7 +418,8 @@ class GoogleAuthView(APIView):
                     {
                         'error': 'Device verification failed',
                         'code': 'DEVICE_ERROR',
-                        'message': 'An error occurred during device verification. Please try again or contact support.',
+                        'message': f'Device verification error: {type(e).__name__}: {str(e)}',
+                        'debug': str(e),
                     },
                     status=status.HTTP_500_INTERNAL_SERVER_ERROR
                 )
