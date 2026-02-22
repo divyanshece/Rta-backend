@@ -2480,6 +2480,45 @@ class StudentClassesView(APIView):
         return Response(result)
 
 
+class StudentActiveSessionView(APIView):
+    """Check for any active attendance session the student should join"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def get(self, request):
+        if request.user_type != 'student':
+            return Response({'error': 'Students only'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            student = Student.objects.get(student_email=request.user)
+        except Student.DoesNotExist:
+            return Response({'error': 'Student not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Find active sessions for subjects the student is enrolled in
+        from django.db.models import Q
+        enrolled_subject_ids = list(
+            SubjectEnrollment.objects.filter(student=student).values_list('subject_id', flat=True)
+        )
+
+        if not enrolled_subject_ids:
+            return Response({'active_session': None})
+
+        active_session = Session.objects.filter(
+            subject_id__in=enrolled_subject_ids,
+            is_active=True,
+        ).select_related('subject', 'subject__course', 'subject__class_field').first()
+
+        if not active_session:
+            return Response({'active_session': None})
+
+        return Response({
+            'active_session': {
+                'session_id': active_session.session_id,
+                'subject_name': active_session.subject.course.course_name if active_session.subject.course else '',
+                'class_name': str(active_session.subject.class_field) if active_session.subject.class_field else '',
+            }
+        })
+
+
 class StudentTodayScheduleView(APIView):
     """Get today's schedule for a student"""
     permission_classes = [IsJWTAuthenticated]
