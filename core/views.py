@@ -308,8 +308,20 @@ class GoogleAuthView(APIView):
                 platform = 'ANDROID'  # Default to Android for mobile
 
             try:
-                # Normalize device_uuid to string for safe comparison/storage
+                import uuid as uuid_module
+
+                # Normalize device_uuid to string for safe comparison
                 device_uuid = str(device_uuid).strip()
+
+                # Helper: convert any string to valid UUID for DB storage
+                # (needed if migration hasn't run and column is still UUIDField)
+                def to_safe_uuid(raw_id):
+                    try:
+                        uuid_module.UUID(raw_id)
+                        return raw_id  # Already valid UUID
+                    except (ValueError, AttributeError):
+                        # Not UUID format (e.g. Android ID) - generate deterministic UUID
+                        return str(uuid_module.uuid5(uuid_module.NAMESPACE_DNS, raw_id))
 
                 # Check for existing active device
                 active_device = Device.objects.filter(user_email=email, active=True).first()
@@ -317,7 +329,8 @@ class GoogleAuthView(APIView):
                 if active_device:
                     # Check if it's the SAME device (UUID-only comparison;
                     # fingerprint is stored for audit but not used for blocking)
-                    is_same_device = str(active_device.device_uuid) == device_uuid
+                    stored_uuid = str(active_device.device_uuid)
+                    is_same_device = (stored_uuid == device_uuid or stored_uuid == to_safe_uuid(device_uuid))
 
                     if is_same_device:
                         # Same device - allow login, update fingerprint & last_login
@@ -353,10 +366,12 @@ class GoogleAuthView(APIView):
 
                 # No active device - check if this device was previously registered
                 # Use Python-level comparison to avoid DB-level UUID validation issues
+                safe_uuid = to_safe_uuid(device_uuid)
                 all_devices = Device.objects.filter(user_email=email)
                 existing_device = None
                 for dev in all_devices:
-                    if str(dev.device_uuid) == device_uuid:
+                    stored = str(dev.device_uuid)
+                    if stored == device_uuid or stored == safe_uuid:
                         existing_device = dev
                         break
 
@@ -388,14 +403,26 @@ class GoogleAuthView(APIView):
                 # Deactivate any existing devices first
                 all_devices.update(active=False)
 
-                new_device = Device.objects.create(
-                    user_email=email,
-                    device_uuid=device_uuid,
-                    fingerprint_hash=fingerprint_hash or 'unknown',
-                    integrity_level='BASIC',
-                    platform=platform,
-                    active=True,
-                )
+                # Try creating with raw device_uuid first (works if migration applied / CharField)
+                # Fall back to UUID-converted version (works if column is still UUIDField)
+                try:
+                    new_device = Device.objects.create(
+                        user_email=email,
+                        device_uuid=device_uuid,
+                        fingerprint_hash=fingerprint_hash or 'unknown',
+                        integrity_level='BASIC',
+                        platform=platform,
+                        active=True,
+                    )
+                except (ValueError, Exception):
+                    new_device = Device.objects.create(
+                        user_email=email,
+                        device_uuid=safe_uuid,
+                        fingerprint_hash=fingerprint_hash or 'unknown',
+                        integrity_level='BASIC',
+                        platform=platform,
+                        active=True,
+                    )
 
                 user_info = self._get_student_info(student)
                 access_token = self._generate_jwt(student.student_email, 'student', device_id=new_device.device_id)
