@@ -1,9 +1,12 @@
 import math
+import logging
 
 from channels.generic.websocket import AsyncJsonWebsocketConsumer
 from channels.db import database_sync_to_async
 from django.utils import timezone
 from django.conf import settings
+
+logger = logging.getLogger(__name__)
 
 
 def haversine(lat1, lon1, lat2, lon2):
@@ -19,8 +22,12 @@ def haversine(lat1, lon1, lat2, lon2):
 class AttendanceConsumer(AsyncJsonWebsocketConsumer):
     async def connect(self):
         await self.accept()
-        await self.channel_layer.group_add('all_students', self.channel_name)
-        await self.channel_layer.group_add('all_teachers', self.channel_name)
+        try:
+            await self.channel_layer.group_add('all_students', self.channel_name)
+            await self.channel_layer.group_add('all_teachers', self.channel_name)
+            logger.info(f'WebSocket connected and joined groups: {self.channel_name}')
+        except Exception as e:
+            logger.error(f'WebSocket group_add failed: {e}')
 
         await self.send_json({
             'type': 'connected',
@@ -28,8 +35,11 @@ class AttendanceConsumer(AsyncJsonWebsocketConsumer):
         })
 
     async def disconnect(self, close_code):
-        await self.channel_layer.group_discard('all_students', self.channel_name)
-        await self.channel_layer.group_discard('all_teachers', self.channel_name)
+        try:
+            await self.channel_layer.group_discard('all_students', self.channel_name)
+            await self.channel_layer.group_discard('all_teachers', self.channel_name)
+        except Exception as e:
+            logger.error(f'WebSocket group_discard failed: {e}')
 
     async def receive_json(self, content):
         msg_type = content.get('type')
