@@ -1,6 +1,9 @@
 import os
+import logging
 from django.shortcuts import render
 from django.views.decorators.csrf import csrf_exempt
+
+logger = logging.getLogger(__name__)
 from django.utils.decorators import method_decorator
 
 # Create your views here.
@@ -762,7 +765,7 @@ class InitiateAttendanceView(APIView):
             # Get student emails
             student_emails = list(students.values_list('student_email', flat=True))
 
-            # Broadcast to all students (non-blocking - don't fail if Redis is down)
+            # Broadcast to all students via WebSocket
             try:
                 channel_layer = get_channel_layer()
                 async_to_sync(channel_layer.group_send)(
@@ -773,8 +776,8 @@ class InitiateAttendanceView(APIView):
                         'message': 'Attendance session started'
                     }
                 )
-            except Exception:
-                pass  # WebSocket broadcast is optional
+            except Exception as e:
+                logger.error(f'WebSocket broadcast attendance_started failed: {e}')
 
             return Response({
                 'session_id': session.session_id,
@@ -858,7 +861,7 @@ class CloseAttendanceView(APIView):
             session.closed_at = timezone.now()
             session.save()
 
-            # Broadcast (non-blocking)
+            # Broadcast session closed via WebSocket
             try:
                 channel_layer = get_channel_layer()
                 async_to_sync(channel_layer.group_send)(
@@ -869,8 +872,8 @@ class CloseAttendanceView(APIView):
                         'message': 'Session closed'
                     }
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f'WebSocket broadcast attendance_closed failed: {e}')
 
             return Response(
                 {'message': 'Session closed successfully'},
@@ -931,7 +934,7 @@ class RegenerateOTPView(APIView):
             session.otp_generated_at = timezone.now()
             session.save()
 
-            # Broadcast OTP regeneration (non-blocking)
+            # Broadcast OTP regeneration via WebSocket
             try:
                 channel_layer = get_channel_layer()
                 async_to_sync(channel_layer.group_send)(
@@ -942,8 +945,8 @@ class RegenerateOTPView(APIView):
                         'message': 'New OTP generated'
                     }
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f'WebSocket broadcast otp_regenerated failed: {e}')
 
             return Response({
                 'session_id': session.session_id,
@@ -1104,7 +1107,7 @@ class ManualMarkView(APIView):
                 attendance.submitted_at = timezone.now()
             attendance.save()
 
-            # Broadcast update (non-blocking)
+            # Broadcast update via WebSocket
             try:
                 channel_layer = get_channel_layer()
                 async_to_sync(channel_layer.group_send)(
@@ -1116,8 +1119,8 @@ class ManualMarkView(APIView):
                         'status': new_status
                     }
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error(f'WebSocket broadcast attendance_update failed: {e}')
 
             return Response(
                 {'message': 'Attendance updated successfully'},
@@ -2526,6 +2529,96 @@ class StudentActiveSessionView(APIView):
                 'class_name': str(subject.class_field) if subject.class_field else '',
             }
         })
+
+
+class StudentSubmitOTPView(APIView):
+    """HTTP fallback for OTP submission when WebSocket is unavailable"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def post(self, request):
+        if request.user_type != 'student':
+            return Response({'error': 'Students only'}, status=status.HTTP_403_FORBIDDEN)
+
+        session_id = request.data.get('session_id')
+        otp = request.data.get('otp')
+        latitude = request.data.get('latitude')
+        longitude = request.data.get('longitude')
+
+        if not session_id or not otp:
+            return Response({'success': False, 'message': 'session_id and otp required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        student_email = str(request.user)
+
+        MAX_RETRY_COUNT = 3
+        OTP_VALIDITY_SECONDS = getattr(settings, 'OTP_VALIDITY_SECONDS', 30)
+
+        try:
+            session = Session.objects.get(session_id=session_id)
+        except Session.DoesNotExist:
+            return Response({'success': False, 'message': 'Session not found'})
+
+        if not session.is_active:
+            return Response({'success': False, 'message': 'Session closed'})
+
+        try:
+            student = Student.objects.get(student_email=student_email)
+        except Student.DoesNotExist:
+            return Response({'success': False, 'message': 'Student not found'})
+
+        attendance = Attendance.objects.filter(session=session, student=student).first()
+        if not attendance:
+            return Response({'success': False, 'message': 'You are not enrolled in this class'})
+
+        if attendance.status == 'P':
+            return Response({'success': True, 'message': 'Attendance already marked', 'status': 'P'})
+
+        if attendance.retry_count >= MAX_RETRY_COUNT:
+            return Response({'success': False, 'message': 'Too many failed attempts. Contact your teacher.', 'blocked': True})
+
+        # Check OTP expiry
+        if session.otp_generated_at:
+            elapsed = (timezone.now() - session.otp_generated_at).total_seconds()
+            if elapsed > OTP_VALIDITY_SECONDS:
+                return Response({'success': False, 'message': 'OTP expired. Wait for teacher to generate new OTP.'})
+
+        # Validate OTP
+        if session.otp.upper() != otp.upper():
+            attendance.retry_count += 1
+            attendance.save()
+            remaining = MAX_RETRY_COUNT - attendance.retry_count
+            if attendance.retry_count >= MAX_RETRY_COUNT:
+                return Response({'success': False, 'message': 'Too many failed attempts. Contact your teacher.', 'blocked': True})
+            return Response({'success': False, 'message': f'Invalid OTP. {remaining} attempt(s) remaining.'})
+
+        # OTP valid — determine status based on GPS
+        if session.class_mode == 'offline' and session.teacher_latitude is not None and session.teacher_longitude is not None:
+            if latitude is not None and longitude is not None:
+                try:
+                    from core.consumers import haversine
+                    distance = haversine(
+                        session.teacher_latitude, session.teacher_longitude,
+                        float(latitude), float(longitude)
+                    )
+                    if distance <= session.proximity_radius:
+                        attendance.status = 'P'
+                        message = 'Attendance marked successfully'
+                    else:
+                        attendance.status = 'X'
+                        message = 'Attendance flagged — you appear to be outside classroom range'
+                except (ValueError, TypeError):
+                    attendance.status = 'X'
+                    message = 'Attendance flagged — invalid location data'
+            else:
+                attendance.status = 'X'
+                message = 'Attendance flagged — location not available'
+        else:
+            attendance.status = 'P'
+            message = 'Attendance marked successfully'
+
+        attendance.submitted_at = timezone.now()
+        attendance.save()
+
+        return Response({'success': True, 'message': message, 'status': attendance.status})
 
 
 class StudentTodayScheduleView(APIView):
