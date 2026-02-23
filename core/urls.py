@@ -67,6 +67,9 @@ from .views import (
     AdminTeacherListView,
     AdminTeacherImportView,
     AdminDepartmentListView,
+    AdminDepartmentClassesView,
+    AdminClassSubjectsView,
+    AdminSubjectDetailView,
     AdminToggleView,
     # Admin Student Management
     AdminStudentListView,
@@ -172,6 +175,9 @@ urlpatterns = [
     path('admin/teachers/', AdminTeacherListView.as_view(), name='admin-teachers'),
     path('admin/teachers/import/', AdminTeacherImportView.as_view(), name='admin-teachers-import'),
     path('admin/departments/', AdminDepartmentListView.as_view(), name='admin-departments'),
+    path('admin/departments/<int:department_id>/classes/', AdminDepartmentClassesView.as_view(), name='admin-department-classes'),
+    path('admin/departments/<int:department_id>/classes/<int:class_id>/subjects/', AdminClassSubjectsView.as_view(), name='admin-class-subjects'),
+    path('admin/departments/<int:department_id>/classes/<int:class_id>/subjects/<int:subject_id>/', AdminSubjectDetailView.as_view(), name='admin-subject-detail'),
     path('admin/toggle/', AdminToggleView.as_view(), name='admin-toggle'),
 
     # Admin Student Management
