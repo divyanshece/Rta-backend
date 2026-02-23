@@ -3958,6 +3958,47 @@ class AdminTeacherListView(APIView):
             'is_admin': make_admin,
         }, status=status.HTTP_201_CREATED)
 
+    def put(self, request):
+        """Edit a teacher's details"""
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        email = request.data.get('email')
+        if not email:
+            return Response({'error': 'Teacher email is required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            teacher = Teacher.objects.get(teacher_email=email, organization=org)
+        except Teacher.DoesNotExist:
+            return Response({'error': 'Teacher not found in this organization'}, status=status.HTTP_404_NOT_FOUND)
+
+        name = request.data.get('name')
+        designation = request.data.get('designation')
+        department_id = request.data.get('department_id')
+
+        if name:
+            teacher.name = name
+        if designation:
+            teacher.designation = designation
+        if department_id:
+            try:
+                department = Department.objects.get(department_id=department_id, organization=org)
+                teacher.department = department
+            except Department.DoesNotExist:
+                return Response({'error': 'Department not found in this organization'}, status=status.HTTP_400_BAD_REQUEST)
+
+        teacher.save()
+
+        return Response({
+            'message': 'Teacher updated successfully',
+            'email': teacher.teacher_email,
+            'name': teacher.name,
+            'designation': teacher.designation,
+            'department_id': teacher.department.department_id if teacher.department else None,
+            'department_name': teacher.department.department_name if teacher.department else None,
+        })
+
     def delete(self, request):
         """Remove a teacher from the organization"""
         org = self._get_org_for_admin(request)
@@ -4195,6 +4236,180 @@ class AdminDepartmentListView(APIView):
 
         department.delete()
         return Response({'message': 'Department deleted'})
+
+
+class AdminDepartmentClassesView(APIView):
+    """List classes in a department for org admin"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def _get_org_for_admin(self, request):
+        if request.user_type != 'teacher':
+            return None
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+        return admin_entry.organization if admin_entry else None
+
+    def get(self, request, department_id):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            department = Department.objects.get(department_id=department_id, organization=org)
+        except Department.DoesNotExist:
+            return Response({'error': 'Department not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        classes = ClassModel.objects.filter(department=department).annotate(
+            student_count=Count('student', distinct=True),
+            subject_count=Count('subject', distinct=True),
+        ).select_related('coordinator').order_by('-is_active', '-batch', '-semester', 'section')
+
+        class_list = [
+            {
+                'class_id': c.class_id,
+                'batch': c.batch,
+                'semester': c.semester,
+                'section': c.section,
+                'is_active': c.is_active,
+                'student_count': c.student_count,
+                'subject_count': c.subject_count,
+                'coordinator_name': c.coordinator.name if c.coordinator else None,
+            }
+            for c in classes
+        ]
+
+        return Response({
+            'department_id': department.department_id,
+            'department_name': department.department_name,
+            'classes': class_list,
+            'count': len(class_list),
+        })
+
+
+class AdminClassSubjectsView(APIView):
+    """List subjects in a class for org admin"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def _get_org_for_admin(self, request):
+        if request.user_type != 'teacher':
+            return None
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+        return admin_entry.organization if admin_entry else None
+
+    def get(self, request, department_id, class_id):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            department = Department.objects.get(department_id=department_id, organization=org)
+        except Department.DoesNotExist:
+            return Response({'error': 'Department not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            class_obj = ClassModel.objects.get(class_id=class_id, department=department)
+        except ClassModel.DoesNotExist:
+            return Response({'error': 'Class not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        subjects = Subject.objects.filter(class_field=class_obj).select_related(
+            'course', 'teacher'
+        ).annotate(
+            student_count=Count('enrollments', distinct=True),
+            session_count=Count('period__session', distinct=True),
+        )
+
+        subject_list = [
+            {
+                'subject_id': s.subject_id,
+                'course_name': s.course.course_name,
+                'teacher_email': s.teacher.teacher_email,
+                'teacher_name': s.teacher.name,
+                'student_count': s.student_count,
+                'session_count': s.session_count,
+            }
+            for s in subjects
+        ]
+
+        class_name = f"{department.department_name} - Batch {class_obj.batch} - Sem {class_obj.semester} - {class_obj.section}"
+
+        return Response({
+            'class_id': class_obj.class_id,
+            'class_name': class_name,
+            'department_name': department.department_name,
+            'subjects': subject_list,
+            'count': len(subject_list),
+        })
+
+
+class AdminSubjectDetailView(APIView):
+    """Get subject details for org admin"""
+    permission_classes = [IsJWTAuthenticated]
+
+    def _get_org_for_admin(self, request):
+        if request.user_type != 'teacher':
+            return None
+        admin_entry = OrganizationAdmin.objects.select_related('organization').filter(
+            teacher__teacher_email=str(request.user)
+        ).first()
+        return admin_entry.organization if admin_entry else None
+
+    def get(self, request, department_id, class_id, subject_id):
+        org = self._get_org_for_admin(request)
+        if not org:
+            return Response({'error': 'Admin access required'}, status=status.HTTP_403_FORBIDDEN)
+
+        try:
+            department = Department.objects.get(department_id=department_id, organization=org)
+        except Department.DoesNotExist:
+            return Response({'error': 'Department not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            class_obj = ClassModel.objects.get(class_id=class_id, department=department)
+        except ClassModel.DoesNotExist:
+            return Response({'error': 'Class not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            subject = Subject.objects.select_related('course', 'teacher').get(
+                subject_id=subject_id, class_field=class_obj
+            )
+        except Subject.DoesNotExist:
+            return Response({'error': 'Subject not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        enrolled_count = SubjectEnrollment.objects.filter(subject=subject).count()
+        sessions = Session.objects.filter(period__subject=subject)
+        total_sessions = sessions.count()
+        last_session = sessions.order_by('-date').first()
+
+        # Calculate average attendance
+        avg_attendance = 0
+        if total_sessions > 0:
+            total_present = Attendance.objects.filter(
+                session__period__subject=subject, status='P'
+            ).count()
+            total_records = Attendance.objects.filter(
+                session__period__subject=subject
+            ).count()
+            if total_records > 0:
+                avg_attendance = round((total_present / total_records) * 100, 1)
+
+        class_name = f"{department.department_name} - Batch {class_obj.batch} - Sem {class_obj.semester} - {class_obj.section}"
+
+        return Response({
+            'subject_id': subject.subject_id,
+            'course_name': subject.course.course_name,
+            'class_id': class_obj.class_id,
+            'class_name': class_name,
+            'teacher_email': subject.teacher.teacher_email,
+            'teacher_name': subject.teacher.name,
+            'teacher_designation': subject.teacher.designation,
+            'enrolled_student_count': enrolled_count,
+            'total_sessions': total_sessions,
+            'average_attendance': avg_attendance,
+            'last_session_date': last_session.date.isoformat() if last_session else None,
+        })
 
 
 class AdminToggleView(APIView):
