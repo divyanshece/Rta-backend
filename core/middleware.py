@@ -33,8 +33,10 @@ class JWTAuthenticationMiddleware:
         public_paths = [
             '/auth/google',
             '/auth/admin/login',
+            '/auth/refresh',
             '/api/auth/google',
             '/api/auth/admin/login',
+            '/api/auth/refresh',
             '/departments',
         ]
 

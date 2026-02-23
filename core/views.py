@@ -75,7 +75,11 @@ def sanitize_group_name(email):
 
 
 def _encode_jwt(email, user_type, device_id=None, refresh=False):
-    expiry = timedelta(days=7 if refresh else 1)
+    if refresh:
+        # Inactivity-based expiry: teachers/admins get 30 days, students get 7 days
+        expiry = timedelta(days=30) if user_type in ('teacher', 'admin') else timedelta(days=7)
+    else:
+        expiry = timedelta(days=1)
     payload = {
         'email': email,
         'user_type': user_type,
@@ -122,6 +126,112 @@ class AdminLoginView(APIView):
             },
             status=status.HTTP_200_OK,
         )
+
+
+class RefreshTokenView(APIView):
+    """
+    Token refresh endpoint. Accepts a refresh token and returns new access + refresh tokens.
+    Implements token rotation: each refresh issues a new refresh token too.
+    """
+    permission_classes = []
+
+    def post(self, request):
+        refresh_token = request.data.get('refresh_token')
+        if not refresh_token:
+            return Response({'error': 'Refresh token required'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            payload = jwt.decode(
+                refresh_token,
+                getattr(settings, 'JWT_SECRET', settings.SECRET_KEY),
+                algorithms=['HS256']
+            )
+        except jwt.ExpiredSignatureError:
+            return Response(
+                {'error': 'Session expired. Please login again.'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+        except jwt.InvalidTokenError:
+            return Response(
+                {'error': 'Invalid refresh token'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        # Only accept refresh tokens
+        if payload.get('type') != 'refresh':
+            return Response(
+                {'error': 'Invalid token type'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        email = payload.get('email')
+        user_type = payload.get('user_type')
+        device_id = payload.get('device_id')
+
+        if not email or not user_type:
+            return Response(
+                {'error': 'Invalid refresh token'},
+                status=status.HTTP_401_UNAUTHORIZED
+            )
+
+        # For students, validate that the device is still active
+        if user_type == 'student':
+            if not device_id:
+                return Response(
+                    {'error': 'Invalid session. Please login again.'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+            device = Device.objects.filter(
+                device_id=device_id,
+                user_email=email,
+            ).first()
+
+            if not device:
+                return Response(
+                    {'error': 'Device not found. Please login again.'},
+                    status=status.HTTP_401_UNAUTHORIZED
+                )
+
+            if not device.active:
+                return Response(
+                    {'error': 'Device has been deactivated. Please contact your teacher to reset your device.'},
+                    status=status.HTTP_403_FORBIDDEN
+                )
+
+        # Build user info for the response
+        user_info = {'email': email, 'user_type': user_type}
+
+        if user_type == 'teacher':
+            teacher = Teacher.objects.filter(teacher_email=email, verified=True).first()
+            if not teacher:
+                return Response({'error': 'User not found'}, status=status.HTTP_401_UNAUTHORIZED)
+            user_info['name'] = teacher.name
+            user_info['designation'] = teacher.designation
+            user_info['department'] = teacher.department.department_name if teacher.department else None
+        elif user_type == 'student':
+            student = Student.objects.filter(student_email=email, verified=True).first()
+            if not student:
+                return Response({'error': 'User not found'}, status=status.HTTP_401_UNAUTHORIZED)
+            user_info['name'] = student.name
+            user_info['roll_no'] = student.roll_no
+            user_info['class_id'] = student.class_field.class_id if student.class_field else None
+        elif user_type == 'admin':
+            from django.contrib.auth.models import User
+            admin_user = User.objects.filter(username=email).first()
+            if not admin_user or not (admin_user.is_staff or admin_user.is_superuser):
+                return Response({'error': 'User not found'}, status=status.HTTP_401_UNAUTHORIZED)
+            user_info['name'] = admin_user.username
+
+        # Issue new tokens (token rotation)
+        new_access_token = _encode_jwt(email, user_type, device_id=device_id)
+        new_refresh_token = _encode_jwt(email, user_type, device_id=device_id, refresh=True)
+
+        return Response({
+            'access_token': new_access_token,
+            'refresh_token': new_refresh_token,
+            'user': user_info,
+        }, status=status.HTTP_200_OK)
 
 
 class PendingUsersView(APIView):
