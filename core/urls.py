@@ -9,6 +9,7 @@ from .views import (
     StudentLogoutView,
     ResetStudentDeviceView,
     StudentDeviceInfoView,
+    RegisterFCMTokenView,
     InitiateAttendanceView,
     CloseAttendanceView,
     RegenerateOTPView,
@@ -93,6 +94,7 @@ urlpatterns = [
     path('auth/logout', StudentLogoutView.as_view(), name='student-logout'),
     path('devices/reset', ResetStudentDeviceView.as_view(), name='reset-student-device'),
     path('devices/info/<str:email>/', StudentDeviceInfoView.as_view(), name='student-device-info'),
+    path('devices/fcm-token', RegisterFCMTokenView.as_view(), name='register-fcm-token'),
 
     # Teacher APIs - Attendance Management
     path('attendance/initiate', InitiateAttendanceView.as_view(), name='initiate-attendance'),
