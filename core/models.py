@@ -264,7 +264,8 @@ class Device(models.Model):
     active = models.BooleanField(default=True)
     registered_at = models.DateTimeField(auto_now_add=True)
     last_login = models.DateTimeField(auto_now=True)
-    
+    fcm_token = models.CharField(max_length=255, null=True, blank=True)
+
     class Meta:
         db_table = 'device'
         unique_together = [['user_email', 'device_uuid', 'fingerprint_hash']]

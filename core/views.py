@@ -94,6 +94,41 @@ def _encode_jwt(email, user_type, device_id=None, refresh=False):
     return jwt.encode(payload, getattr(settings, 'JWT_SECRET', settings.SECRET_KEY), algorithm='HS256')
 
 
+def send_push_notifications(tokens, title, body, data=None):
+    """
+    Send push notifications via Firebase Cloud Messaging (v1 API).
+    Fire-and-forget: logs errors but never raises exceptions.
+    """
+    try:
+        from firebase_admin import messaging as fcm_messaging
+
+        if not tokens:
+            return
+
+        tokens = list(set(tokens))  # deduplicate
+        messages = []
+        for token in tokens:
+            msg = fcm_messaging.Message(
+                notification=fcm_messaging.Notification(title=title, body=body),
+                data=data or {},
+                token=token,
+            )
+            messages.append(msg)
+
+        response = fcm_messaging.send_each(messages)
+        # Clean up invalid tokens
+        for i, send_response in enumerate(response.responses):
+            if send_response.exception:
+                error_code = getattr(send_response.exception, 'code', '')
+                if 'UNREGISTERED' in str(error_code) or 'INVALID_ARGUMENT' in str(error_code):
+                    Device.objects.filter(fcm_token=tokens[i]).update(fcm_token=None)
+                logger.warning(f'FCM send failed for token {i}: {send_response.exception}')
+
+        logger.info(f'FCM: {response.success_count}/{len(tokens)} sent successfully')
+    except Exception as e:
+        logger.error(f'Push notification error (non-fatal): {e}')
+
+
 class AdminLoginView(APIView):
     permission_classes = []
 
@@ -716,6 +751,37 @@ class StudentDeviceInfoView(APIView):
             'student_email': email,
             'devices': list(devices)
         })
+
+
+class RegisterFCMTokenView(APIView):
+    """
+    Register FCM token for push notifications.
+    Students: updates fcm_token on their existing active device.
+    Teachers: ignored (teachers don't need push notifications for now).
+    """
+    permission_classes = [IsJWTAuthenticated]
+
+    def post(self, request):
+        fcm_token = request.data.get('fcm_token')
+        if not fcm_token:
+            return Response({'error': 'fcm_token is required'}, status=400)
+
+        user_email = str(request.user)
+
+        if request.user_type == 'student':
+            # Update the student's active device - never create a new record
+            updated = Device.objects.filter(
+                user_email=user_email,
+                active=True,
+            ).update(fcm_token=fcm_token)
+
+            if updated == 0:
+                return Response({'error': 'No active device found'}, status=404)
+
+            return Response({'message': 'FCM token registered'})
+
+        # Teachers don't need device-based push notifications
+        return Response({'message': 'OK'})
 
 
 @method_decorator(csrf_exempt, name='dispatch')
@@ -3187,6 +3253,42 @@ class AnnouncementListView(APIView):
                 title=title,
                 content=content
             )
+
+            # Send push notifications (fire-and-forget, never blocks response)
+            try:
+                # Get all student emails enrolled in this class
+                primary_emails = set(
+                    Student.objects.filter(class_field=class_obj, verified=True)
+                    .values_list('student_email', flat=True)
+                )
+                multi_emails = set(
+                    StudentClass.objects.filter(class_obj=class_obj)
+                    .values_list('student__student_email', flat=True)
+                )
+                all_emails = primary_emails | multi_emails
+
+                if all_emails:
+                    fcm_tokens = list(
+                        Device.objects.filter(
+                            user_email__in=all_emails,
+                            active=True,
+                            fcm_token__isnull=False,
+                        ).exclude(fcm_token='').values_list('fcm_token', flat=True)
+                    )
+
+                    if fcm_tokens:
+                        send_push_notifications(
+                            tokens=fcm_tokens,
+                            title=title,
+                            body=content[:100] + ('...' if len(content) > 100 else ''),
+                            data={
+                                'type': 'announcement',
+                                'class_id': str(class_id),
+                                'announcement_id': str(announcement.announcement_id),
+                            }
+                        )
+            except Exception as e:
+                logger.error(f'Push notification error (non-fatal): {e}')
 
             return Response({
                 'announcement_id': announcement.announcement_id,
