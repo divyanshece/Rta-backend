@@ -2,6 +2,7 @@ from django.urls import path
 from .views import (
     GoogleAuthView,
     AdminLoginView,
+    RefreshTokenView,
     PendingUsersView,
     VerifyUserView,
     ApproveDeviceView,
@@ -83,6 +84,7 @@ urlpatterns = [
     # Authentication
     path('auth/google', GoogleAuthView.as_view(), name='google-auth'),
     path('auth/admin/login', AdminLoginView.as_view(), name='admin-login'),
+    path('auth/refresh', RefreshTokenView.as_view(), name='token-refresh'),
     path('auth/admin/pending-users', PendingUsersView.as_view(), name='pending-users'),
     path('auth/admin/verify-user', VerifyUserView.as_view(), name='verify-user'),
     path('devices/approve', ApproveDeviceView.as_view(), name='approve-device'),
